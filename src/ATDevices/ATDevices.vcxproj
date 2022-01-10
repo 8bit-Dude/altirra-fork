@@ -8,6 +8,7 @@
     <ClCompile Include="source\diskdrive.cpp" />
     <ClCompile Include="source\dongle.cpp" />
     <ClCompile Include="source\exeloader.cpp" />
+    <ClCompile Include="source\hub.cpp" />
     <ClCompile Include="source\loopback.cpp" />
     <ClCompile Include="source\modemsound.cpp" />
     <ClCompile Include="source\parfilewriter.cpp" />
@@ -24,6 +25,7 @@
     <ClInclude Include="h\at\atdevices\blockdevwritefilter.h" />
     <ClInclude Include="h\at\atdevices\corvus.h" />
     <ClInclude Include="h\at\atdevices\dongle.h" />
+    <ClInclude Include="h\at\atdevices\hub.h" />
     <ClInclude Include="h\at\atdevices\parfilewriter.h" />
     <ClInclude Include="h\diskdrive.h" />
     <ClInclude Include="h\exeloader.h" />

@@ -303,6 +303,7 @@
     <ClCompile Include="source\uiconfdevcustom.cpp" />
     <ClCompile Include="source\uiconfdevdongle.cpp" />
     <ClCompile Include="source\uiconfdevhappy810.cpp" />
+    <ClCompile Include="source\uiconfdevhub.cpp" />
     <ClCompile Include="source\uiconfdevkmkjzide.cpp" />
     <ClCompile Include="source\uiconfdevkmkjzide2.cpp" />
     <ClCompile Include="source\uiconfdevparfilewriter.cpp" />

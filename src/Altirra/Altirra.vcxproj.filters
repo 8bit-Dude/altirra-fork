@@ -871,6 +871,9 @@
     <ClCompile Include="source\pokeysavecompat.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="source\uiconfdevhub.cpp">
+      <Filter>Source Files - Device Configuration UI</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="h\antic.h">

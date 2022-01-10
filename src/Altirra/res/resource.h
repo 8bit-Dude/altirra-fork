@@ -163,6 +163,7 @@
 #define IDR_TAPEEDITOR_ACCEL            249
 #define IDR_TAPEEDITOR_MENU             250
 #define IDD_CHECKFORUPDATES             251
+#define IDD_DEVICE_HUB					252
 #define IDI_DISK                        500
 #define IDI_TAPE                        501
 #define IDI_XEX                         502

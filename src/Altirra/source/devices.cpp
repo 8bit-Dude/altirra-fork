@@ -60,6 +60,7 @@ extern const ATDeviceDefinition g_ATDeviceDefSIDE;
 extern const ATDeviceDefinition g_ATDeviceDefSIDE2;
 extern const ATDeviceDefinition g_ATDeviceDefSIDE3;
 extern const ATDeviceDefinition g_ATDeviceDefDongle;
+extern const ATDeviceDefinition g_ATDeviceDefHub;
 extern const ATDeviceDefinition g_ATDeviceDefPBIDisk;
 extern const ATDeviceDefinition g_ATDeviceDefDiskDrive810;
 extern const ATDeviceDefinition g_ATDeviceDefDiskDrive810Archiver;
@@ -138,6 +139,7 @@ void ATRegisterDevices(ATDeviceManager& dm) {
 		&g_ATDeviceDefSIDE2,
 		&g_ATDeviceDefSIDE3,
 		&g_ATDeviceDefDongle,
+		&g_ATDeviceDefHub,
 		&g_ATDeviceDefPBIDisk,
 		&g_ATDeviceDefDiskDrive810,
 		&g_ATDeviceDefDiskDrive810Archiver,

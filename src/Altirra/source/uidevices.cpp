@@ -220,6 +220,10 @@ const ATUIDialogDeviceNew::CategoryEntry ATUIDialogDeviceNew::kCategories[]={
 				L"External 80-column video output that attaches to the joystick port and drives a separate display. "
 					L"Additional handler software is required (provided on Additions disk)."
 			},
+			{ "hub", L"8bit-Hub",
+				L"The 8bit-Hub is a peripheral that adds Wifi / SD Card / PS2 Mouse / 3 Joystick ports."
+					L"It connects to joystick port 2 (check www.8bit-unity.com for compatible applications)."
+			},
 		}
 	},
 	{

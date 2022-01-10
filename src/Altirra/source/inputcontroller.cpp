@@ -244,6 +244,8 @@ void ATPortController::ReapplyTriggers() {
 	mpGTIA->SetControllerTrigger(mTriggerIndex + 1, mbTrigger2);
 }
 
+unsigned char hubTriggerHack;
+
 void ATPortController::UpdatePortValue() {
 	PortInputs::const_iterator it(mPortInputs.begin()), itEnd(mPortInputs.end());
 	
@@ -274,7 +276,9 @@ void ATPortController::UpdatePortValue() {
 		mpPIA->SetInput(mPIAInputIndex, (uint32)mPortValue | 0xFF00);
 
 	bool trigger1 = (portval & 0x100) != 0;
-	bool trigger2 = (portval & 0x1000) != 0;
+	bool trigger2 = (portval & 0x100) != 0;
+	if (hubTriggerHack)
+		trigger2 = 1;
 
 	if (mbTrigger1 != trigger1) {
 		mbTrigger1 = trigger1;

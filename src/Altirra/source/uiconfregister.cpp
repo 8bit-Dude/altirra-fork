@@ -33,6 +33,7 @@ bool ATUIConfDevPocketModem(VDGUIHandle hParent, ATPropertySet& props);
 bool ATUIConfDevCorvus(VDGUIHandle hParent, ATPropertySet& props);
 bool ATUIConfDevMyIDE2(VDGUIHandle hParent, ATPropertySet& props);
 bool ATUIConfDevDongle(VDGUIHandle hParent, ATPropertySet& props);
+bool ATUIConfDevHub(VDGUIHandle hParent, ATPropertySet& props);
 bool ATUIConfDevKMKJZIDE(VDGUIHandle hParent, ATPropertySet& props);
 bool ATUIConfDevKMKJZIDE2(VDGUIHandle hParent, ATPropertySet& props);
 bool ATUIConfDevCovox(VDGUIHandle hParent, ATPropertySet& props);
@@ -67,6 +68,7 @@ void ATRegisterDeviceConfigurers(ATDeviceManager& dev) {
 	dev.AddDeviceConfigurer("corvus", ATUIConfDevCorvus);
 	dev.AddDeviceConfigurer("myide2", ATUIConfDevMyIDE2);
 	dev.AddDeviceConfigurer("dongle", ATUIConfDevDongle);
+	dev.AddDeviceConfigurer("hub", ATUIConfDevHub);
 	dev.AddDeviceConfigurer("kmkjzide", ATUIConfDevKMKJZIDE);
 	dev.AddDeviceConfigurer("kmkjzide2", ATUIConfDevKMKJZIDE2);
 	dev.AddDeviceConfigurer("covox", ATUIConfDevCovox);
