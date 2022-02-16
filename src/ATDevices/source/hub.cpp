@@ -20,8 +20,8 @@
 #include <vd2/system/binary.h>
 #include <at/atcore/deviceport.h>
 #include <at/atcore/propertyset.h>
-#include <at/atdevices/hub.h>
 #include <at/atcore/scheduler.h>
+#include <at/atdevices/hub.h>
 #include <../../../Altirra/h/simulator.h>
 
 extern ATSimulator g_sim;
@@ -77,10 +77,8 @@ bool ATDeviceHub::SetSettings(const ATPropertySet& pset) {
 	return true;
 }
 
-unsigned char* HubProcessByte(unsigned char data, unsigned char* dlen, unsigned char* controls);
-unsigned char hubStrobe = 0, hubByte = 0, hubOffset = 0, hubCur = 0, hubLen = 0, * hubData;
-unsigned char controls[] = {255,255,255,255,160,80};
-extern unsigned char hubTriggerHack;
+unsigned char* HubProcessByte(unsigned char inByte, unsigned char* outLen);
+unsigned char hubStrobe = 0, hubByte = 0, hubBit = 0, hubOffset = 0, hubCur = 0, hubLen = 0, * hubData;
 
 void ATDeviceHub::Init() {
 }
@@ -90,7 +88,6 @@ void ATDeviceHub::Shutdown() {
 		mpPortManager->FreeInput(mPortInput);
 		mpPortManager->FreeOutput(mPortOutput);
 		mpPortManager = nullptr;
-		hubTriggerHack = 0;
 	}
 }
 
@@ -99,6 +96,7 @@ void ATDeviceHub::InitPortInput(IATDevicePortManager* portMgr) {
 	mPortInput = mpPortManager->AllocInput();
 	ReinitPortOutput();
 	mLastPortState = mpPortManager->GetOutputState();
+	mpPortManager->SetInput(mPortInput, mLastPortState | 0x00010000);	// ACKNOW Flag
 }
 
 void ATDeviceHub::WarmReset() {
@@ -110,7 +108,6 @@ void ATDeviceHub::ColdReset() {
 }
 
 void ATDeviceHub::HubReset() {
-	hubTriggerHack = 1;
 	hubStrobe = 0;
 	hubOffset = 0;
 	hubCur = 0;
@@ -119,14 +116,16 @@ void ATDeviceHub::HubReset() {
 
 void ATDeviceHub::OnPortOutputChanged(uint32 c) {
 
-	// Read Bits 4-7 on PORTA
-	//c &= 0xf0;
+	// Set acknow
+	mpPortManager->SetInput(mPortInput, c | 0b00010000);
 
 	if (mLastPortState != c) {
 		mLastPortState = c;
 
 		// Is Strobe ON?
 		if ((c & 0b10000000)) {
+			if ((c & 0b00100000))
+				mpPortManager->SetInput(mPortInput, (c & 0xffbf) | hubBit);
 			hubStrobe = 1;
 			return;
 		}
@@ -135,21 +134,24 @@ void ATDeviceHub::OnPortOutputChanged(uint32 c) {
 		}
 
 		// Is it a Receive or Send request?
-		if (!(c & 0b01000000)) {
-			// Receive 2 bits
-			hubByte |= ((c & 0b00110000) >> 4) << hubOffset;
-			hubOffset += 2;
+		if (!(c & 0b00100000)) {
+			// Receive 1 bit
+			hubByte |= ((c & 0b01000000) << 1) >> hubOffset;
+			hubOffset++;
 			if (hubOffset == 8) {
-				hubData = HubProcessByte(hubByte, &hubLen, controls);
+				hubData = HubProcessByte(hubByte, &hubLen);
 				hubOffset = 0; hubByte = 0; hubCur = 0;
 			}
 		}
 		else {
-			// Send 2 bits
+			// Send 1 bit
 			if (hubData && hubCur < hubLen) {
-				hubByte = ((hubData[hubCur] & (0b00000011 << hubOffset)) >> hubOffset);
-				mpPortManager->SetInput(mPortInput, (c & 0xff0f) | (hubByte << 4));
-				hubOffset += 2;
+				if (hubOffset < 7)
+					hubBit = (hubData[hubCur] & (0b00000001 << hubOffset)) << (6-hubOffset);
+				else
+					hubBit = (hubData[hubCur] & 0b10000000) >> 1;
+				mpPortManager->SetInput(mPortInput, (c & 0xffbf) | hubBit);
+				hubOffset++;
 				if (hubOffset == 8) {
 					hubOffset = 0;
 					hubCur++;
@@ -178,26 +180,36 @@ void ATDeviceHub::ReinitPortOutput() {
 
 //#include <afxwin.h>
 //#include <atlstr.h>
+
 #include <time.h>
 #include <winsock.h>
 
+// Hub management
+unsigned char hubState[6] = { 255, 255, 255, 255, 80, 100 };
+unsigned long hubRX, hubTX, hubBAD;  // stats
+
+// Network management
 char* localip;
 bool socketReady = false;
+
+// TCP/UDP
 struct sockaddr_in udpServer[HUB_SLOTS];
 SOCKET tcpSocket[HUB_SLOTS] = { NULL };
 SOCKET udpSocket[HUB_SLOTS] = { NULL };
 int tcpLen[HUB_SLOTS], udpLen[HUB_SLOTS];
 unsigned char tcpSlot = 0, udpSlot = 0;
+
+// URL
+SOCKET httpSocket = NULL;
 SOCKET webSocket[2] = { NULL };	 // Server and Client
 unsigned char webRxBuffer[256], webTxBuffer[65792];
-unsigned int webhubLen, webTxLen, webTimeout;
+unsigned int webRxLen, webTxLen, webTimeout;
 bool webBusy = false;
 clock_t webTimer;
-SOCKET httpSocket = NULL;
-//CFile hubFile[HUB_FILES];
 
-// Hub stats
-unsigned long mHubRX, mHubTX, mHubBAD;
+// FILES
+//CFile hubFile[HUB_FILES];
+//CString hubRootPath;
 
 ////////////////////////////////
 //      PACKET functions      //
@@ -212,16 +224,16 @@ void HubPushPacket(unsigned char cmd, signed char slot, unsigned char* data, uns
 	packet->next = NULL;
 
 	// Assign ID & Timeout
-	if (++packetID > 15) { packetID = 1; }
+	if (++packetID > 254) { packetID = 1; }
 	packet->ID = packetID;
 	packet->timeout = (clock() * 1000) / CLOCKS_PER_SEC + HUB_TIMEOUT;
 
 	// Copy data to packet
-	packet->len = len + 2;
-	packet->data = (unsigned char*)malloc(len + 2);
-	packet->data[0] = cmd;
-	packet->data[1] = slot;
-	memcpy(&packet->data[2], data, len);
+	packet->cmd = cmd;
+	packet->slot = slot;
+	packet->len = len;
+	packet->data = (unsigned char*)malloc(len);
+	memcpy(packet->data, data, len);
 
 	// Append packet at packetTail of linked list
 	if (!packetHead) {
@@ -236,13 +248,33 @@ void HubPushPacket(unsigned char cmd, signed char slot, unsigned char* data, uns
 	}
 }
 
+packet_t* HubGetPacket(unsigned char cmd, signed char slot) {
+	// Find packet with matching cmd/slot
+	packet_t* packet = packetHead;
+	while (packet) {
+		if (packet->cmd == cmd && packet->slot == slot)
+			return packet;
+		packet = packet->next;
+	}
+	return NULL;
+}
+
 void HubPopPacket(unsigned char ID) {
-	// Remove packet at head of linked list
-	if (packetHead && packetHead->ID == ID) {
-		packet_t* next = packetHead->next;
-		free(packetHead->data);
-		free(packetHead);
-		packetHead = next;
+	// Pop packet with matching ID
+	packet_t* prev = NULL, * next = NULL, * packet = packetHead;
+	while (packet) {
+		next = packet->next;
+		if (packet->ID == ID) {
+			if (prev)
+				prev->next = next;
+			else
+				packetHead = next;
+			free(packet->data);
+			free(packet);
+			return;
+		}
+		prev = packet;
+		packet = next;
 	}
 }
 
@@ -291,7 +323,7 @@ void HubReceiveNetwork(void) {
 			else {
 				webTimer = clock() + webTimeout;
 				webRxBuffer[0] = 0;
-				webhubLen = 0;
+				webRxLen = 0;
 				webBusy = false;
 			}
 		}
@@ -301,7 +333,7 @@ void HubReceiveNetwork(void) {
 			if (clock() > webTimer) {
 				closesocket(webSocket[1]);
 				webSocket[1] = 0;
-				webhubLen = 0;
+				webRxLen = 0;
 				webBusy = false;
 			}
 			else
@@ -312,16 +344,16 @@ void HubReceiveNetwork(void) {
 							if (buffer[c] == '\n') {
 								// Did we find the GET ... line?
 								if (!strncmp((char*)webRxBuffer, "GET", 3)) {
-									webRxBuffer[webhubLen++] = 0;
-									HubPushPacket(HUB_WEB_RECV, -1, webRxBuffer, webhubLen);
+									webRxBuffer[webRxLen++] = 0;
+									HubPushPacket(HUB_WEB_RECV, -1, webRxBuffer, webRxLen);
 									webBusy = true;
 									return;
 								}
 								webRxBuffer[0] = 0;
-								webhubLen = 0;
+								webRxLen = 0;
 							}
 							else if (buffer[c] != '\r') {
-								webRxBuffer[webhubLen++] = buffer[c];
+								webRxBuffer[webRxLen++] = buffer[c];
 							}
 						}
 					}
@@ -336,10 +368,12 @@ void HubReceiveNetwork(void) {
 
 WSADATA wsaData;	// Used to open Windows connection
 
-unsigned char* HubProcessByte(unsigned char data, unsigned char* dlen, unsigned char* controls)
+unsigned char* HubProcessByte(unsigned char inByte, unsigned char* outLen)
 {
-	static unsigned char rcvLen, inLen, inBuffer[256], hubLen, * hubBuffer, outLen, outBuffer[256];
-	static unsigned char hasHeader, hasID, hasLen, comID = 0, hubID = 0;
+	static unsigned char hasHeader, hasCMD, hasLen;
+	static unsigned char inHeader, inCMD, inLen, rcvLen, inBuffer[256];
+	static unsigned char packetLen, * packetData, outID, outBuffer[256];
+	static unsigned char clientVer;
 	unsigned char checksum, i;
 
 	int socket_buffer_size = 65536;
@@ -349,49 +383,103 @@ unsigned char* HubProcessByte(unsigned char data, unsigned char* dlen, unsigned 
 	// Check for incoming packets
 	HubReceiveNetwork();
 
+	// Timeout packets
+	HubTimeoutPacket();
+
 	// Check header
 	if (!hasHeader) {
-		if (data == 170)
+		if (inByte == 85 || inByte == 170) {
 			hasHeader = 1;
-		return 0;
+			inHeader = inByte;
+		}
+		return NULL;
 	}
 
-	// Check ID
-	if (!hasID) {
-		comID = data;
-		hasID = 1;
-		return 0;
+	// Check command
+	if (!hasCMD) {
+		hasCMD = 1;
+		inCMD = inByte;
+		return NULL;
+	}
+
+	// If this a recv request?
+	if (inHeader == 85) {
+		// Try to pop last packet (inByte == ID)
+		HubPopPacket(inByte);
+
+		// Respond to command
+		packetLen = 0;
+		if (inCMD == HUB_SYS_STATE) {
+			// Fetch hub state
+			packetData = hubState;
+			packetLen = 6;
+		}
+		else {
+			// Fetch next packet
+			signed char slot = -1;
+			if (inCMD == HUB_UDP_RECV) slot = udpSlot;
+			if (inCMD == HUB_TCP_RECV) slot = tcpSlot;
+			packet_t* packet = HubGetPacket(inCMD, slot);
+			if (packet) {
+				outID = packet->ID;
+				packetLen = packet->len;
+				packetData = packet->data;
+				hubRX++;
+			}
+		}
+
+		// Compute Checksum
+		checksum = outID;
+		for (unsigned char i = 0; i < packetLen; i++)
+			checksum += packetData[i];
+
+		// Send data over ComLynx
+		unsigned char len = 0;
+		outBuffer[len++] = 170;
+		outBuffer[len++] = outID;
+		outBuffer[len++] = packetLen;
+		for (unsigned char i = 0; i < packetLen; i++)
+			outBuffer[len++] = packetData[i];
+		outBuffer[len++] = checksum;
+
+		// Reset state
+		hasHeader = 0;
+		hasCMD = 0;
+
+		// Return data
+		*outLen = len;
+		return outBuffer;
 	}
 
 	// Check for length
 	if (!hasLen) {
-		inLen = data;
 		hasLen = 1;
+		inLen = inByte;
 		rcvLen = 0;
-		return 0;
+		return NULL;
 	}
 
 	// Add data to buffer
-	inBuffer[rcvLen++] = data;
+	inBuffer[rcvLen++] = inByte;
 
 	// Check if packet was fully received (including extra byte for checksum)
-	if (rcvLen < inLen + 1) { return 0; }
+	if (rcvLen < inLen + 1) { return NULL; }
 
-	// Reset state
+	// Reset states
 	hasHeader = 0;
-	hasID = 0;
+	hasCMD = 0;
 	hasLen = 0;
 
 	// Verify checksum
-	checksum = comID;
+	checksum = inCMD;
 	for (unsigned char i = 0; i < inLen; i++)
 		checksum += inBuffer[i];
 	if (inBuffer[inLen] != checksum) {
-		mHubBAD++; return 0;
+		hubBAD++; 
+		*outLen = 1;
+		outBuffer[0] = 0;
+		return outBuffer;
 	}
-
-	// Try to pop last packet
-	HubPopPacket(comID >> 4);
 
 	// Process received data
 	unsigned int offset;
@@ -402,11 +490,15 @@ unsigned char* HubProcessByte(unsigned char data, unsigned char* dlen, unsigned 
 	struct hostent* phe;
 	if (inLen) {
 		// Record stats
-		mHubTX++;
+		hubTX++;
 
 		// Check command code
-		switch (inBuffer[0]) {
+		switch (inCMD) {
 		case HUB_SYS_RESET:
+			// Obtain client information
+			clientVer = inBuffer[0];
+			outID = 0;
+
 			// Reset sockets
 			for (char i = 0; i < HUB_SLOTS; i++) {
 				if (udpSocket[i]) {
@@ -418,7 +510,7 @@ unsigned char* HubProcessByte(unsigned char data, unsigned char* dlen, unsigned 
 					tcpSocket[i] = 0;
 				}
 			}
-			WSACleanup();
+			if (socketReady) WSACleanup();
 			WSAStartup(0x0101, &wsaData);
 			socketReady = true;
 
@@ -426,12 +518,12 @@ unsigned char* HubProcessByte(unsigned char data, unsigned char* dlen, unsigned 
 			while (packetHead) {
 				HubPopPacket(packetHead->ID);
 			}
-/*			for (i = 0; i < HUB_FILES; i++) {
-				if (hubFile[i].m_hFile != CFile::hFileNull) {
+			for (i = 0; i < HUB_FILES; i++) {
+/*				if (hubFile[i].m_hFile != CFile::hFileNull) {
 					hubFile[i].Close();
 				}
-			}
-*/			mHubBAD = 0;
+*/			}
+			hubBAD = 0;
 			packetID = 0;
 
 			// Get local ip address
@@ -447,15 +539,15 @@ unsigned char* HubProcessByte(unsigned char data, unsigned char* dlen, unsigned 
 		case HUB_SYS_IP:
 			HubPushPacket(HUB_SYS_IP, -1, (unsigned char*)localip, strlen(localip));
 			break;
-/*
-		case HUB_DIR_LS:
+
+/*		case HUB_DIR_LS:
 			// List current directory
 			HANDLE hFind;
 			WIN32_FIND_DATA FindData;
 			hFind = FindFirstFile("microSD\\*.*", &FindData);	// .
 			FindNextFile(hFind, &FindData);										// ..
 			count = 0; len = 1;
-			while (count < inBuffer[1] && FindNextFile(hFind, &FindData)) {
+			while (count < inBuffer[0] && FindNextFile(hFind, &FindData)) {
 				memcpy(&buffer[len], (unsigned char*)FindData.cFileName, strlen(FindData.cFileName));
 				len += strlen(FindData.cFileName);
 				buffer[len++] = 0;
@@ -467,73 +559,72 @@ unsigned char* HubProcessByte(unsigned char data, unsigned char* dlen, unsigned 
 			HubPushPacket(HUB_DIR_LS, -1, buffer, len);
 			FindClose(hFind);
 			break;
-			
+
 		case HUB_FILE_OPEN:
 			// Check if file was previously opened
-			if (hubFile[inBuffer[1]].m_hFile != CFile::hFileNull) {
-				hubFile[inBuffer[1]].Close();
+			if (hubFile[inBuffer[0]].m_hFile != CFile::hFileNull) {
+				hubFile[inBuffer[0]].Close();
 			}
 
 			// Open file (modes are 0:read, 1:write, 2:append)
-			filepath = "microSD\\";
-			filepath.Append((const char*)&inBuffer[3]);
-			switch (inBuffer[2]) {
+			filepath = hubRootPath + "microSD\\" + &inBuffer[2];
+			switch (inBuffer[1]) {
 			case 0:
-				hubFile[inBuffer[1]].Open(filepath, CFile::modeRead);
-				break;
+			hubFile[inBuffer[0]].Open(filepath, CFile::modeRead);
+			break;
 			case 1:
-				hubFile[inBuffer[1]].Open(filepath, CFile::modeCreate | CFile::modeWrite);
-				break;
+			hubFile[inBuffer[0]].Open(filepath, CFile::modeCreate | CFile::modeWrite);
+			break;
 			case 2:
-				hubFile[inBuffer[1]].Open(filepath, CFile::modeWrite);
-				hubFile[inBuffer[1]].SeekToEnd();
-				break;
+			hubFile[inBuffer[0]].Open(filepath, CFile::modeWrite);
+			hubFile[inBuffer[0]].SeekToEnd();
+			break;
 			}
 
 			// Send back file size
-			length = hubFile[inBuffer[1]].GetLength();
+			length = hubFile[inBuffer[0]].GetLength();
 			memcpy(buffer, (char*)&length, 4);
-			HubPushPacket(HUB_FILE_OPEN, inBuffer[1], buffer, 4);
+			HubPushPacket(HUB_FILE_OPEN, inBuffer[0], buffer, 4);
 			break;
 
-		case HUB_FILE_SEEK:
+			case HUB_FILE_SEEK:
 			// Seek file position (offset from beginning)
-			offset = (inBuffer[3] * 256) + inBuffer[2];
-			if (hubFile[inBuffer[1]].m_hFile != CFile::hFileNull) {
-				hubFile[inBuffer[1]].Seek(offset, CFile::begin);
+			offset = (inBuffer[2] * 256) + inBuffer[1];
+			if (hubFile[inBuffer[0]].m_hFile != CFile::hFileNull) {
+			hubFile[inBuffer[0]].Seek(offset, CFile::begin);
 			}
 			break;
 
-		case HUB_FILE_READ:
+			case HUB_FILE_READ:
 			// Read from file
-			slot = inBuffer[1];
-			if (hubFile[inBuffer[1]].m_hFile != CFile::hFileNull) {
-				if ((len = hubFile[inBuffer[1]].Read(buffer, inBuffer[2])) && len > 0) {
-					HubPushPacket(HUB_FILE_READ, slot, buffer, len);
-				}
+			slot = inBuffer[0];
+			if (hubFile[slot].m_hFile != CFile::hFileNull) {
+			if ((len = hubFile[slot].Read(buffer, inBuffer[1])) && len > 0) {
+			HubPushPacket(HUB_FILE_READ, slot, buffer, len);
+			}
 			}
 			break;
 
-		case HUB_FILE_WRITE:
+			case HUB_FILE_WRITE:
 			// Write to file
-			if (hubFile[inBuffer[1]].m_hFile != CFile::hFileNull) {
-				hubFile[inBuffer[1]].Write(&inBuffer[2], inLen - 3);
+			if (hubFile[inBuffer[0]].m_hFile != CFile::hFileNull) {
+			hubFile[inBuffer[0]].Write(&inBuffer[1], inLen - 1);
 			}
 			break;
 
-		case HUB_FILE_CLOSE:
+			case HUB_FILE_CLOSE:
 			// Close file
-			if (hubFile[inBuffer[1]].m_hFile != CFile::hFileNull) {
-				hubFile[inBuffer[1]].Close();
+			if (hubFile[inBuffer[0]].m_hFile != CFile::hFileNull) {
+			hubFile[inBuffer[0]].Close();
 			}
 			break;
 */
 		case HUB_UDP_SLOT:
-			udpSlot = inBuffer[1];
+			udpSlot = inBuffer[0];
 			break;
 
 		case HUB_TCP_SLOT:
-			tcpSlot = inBuffer[1];
+			tcpSlot = inBuffer[0];
 			break;
 
 		case HUB_UDP_OPEN:
@@ -555,17 +646,17 @@ unsigned char* HubProcessByte(unsigned char data, unsigned char* dlen, unsigned 
 			// Set server settings
 			ZeroMemory(&udpServer[slot], sizeof(udpServer[slot]));
 			udpServer[slot].sin_family = AF_INET;
-			udpServer[slot].sin_addr.S_un.S_un_b.s_b1 = inBuffer[1];
-			udpServer[slot].sin_addr.S_un.S_un_b.s_b2 = inBuffer[2];
-			udpServer[slot].sin_addr.S_un.S_un_b.s_b3 = inBuffer[3];
-			udpServer[slot].sin_addr.S_un.S_un_b.s_b4 = inBuffer[4];
-			udpServer[slot].sin_port = htons(inBuffer[5] + inBuffer[6] * 256);
+			udpServer[slot].sin_addr.S_un.S_un_b.s_b1 = inBuffer[0];
+			udpServer[slot].sin_addr.S_un.S_un_b.s_b2 = inBuffer[1];
+			udpServer[slot].sin_addr.S_un.S_un_b.s_b3 = inBuffer[2];
+			udpServer[slot].sin_addr.S_un.S_un_b.s_b4 = inBuffer[3];
+			udpServer[slot].sin_port = htons(inBuffer[4] + inBuffer[5] * 256);
 
 			// Set client settings
 			memset((void*)&sockaddr, '\0', sizeof(struct sockaddr_in));
 			sockaddr.sin_family = AF_INET;
 			sockaddr.sin_addr.s_addr = htonl(INADDR_ANY);
-			sockaddr.sin_port = htons(inBuffer[7] + inBuffer[8] * 256);
+			sockaddr.sin_port = htons(inBuffer[6] + inBuffer[7] * 256);
 
 			// Bind local address to socket
 			if (bind(udpSocket[slot], (struct sockaddr*)&sockaddr, sizeof(sockaddr)) == -1) {
@@ -587,11 +678,11 @@ unsigned char* HubProcessByte(unsigned char data, unsigned char* dlen, unsigned 
 			// Set server settings
 			ZeroMemory(&sockaddr, sizeof(sockaddr));
 			sockaddr.sin_family = AF_INET;
-			sockaddr.sin_addr.S_un.S_un_b.s_b1 = inBuffer[1];
-			sockaddr.sin_addr.S_un.S_un_b.s_b2 = inBuffer[2];
-			sockaddr.sin_addr.S_un.S_un_b.s_b3 = inBuffer[3];
-			sockaddr.sin_addr.S_un.S_un_b.s_b4 = inBuffer[4];
-			sockaddr.sin_port = htons(inBuffer[5] + inBuffer[6] * 256);
+			sockaddr.sin_addr.S_un.S_un_b.s_b1 = inBuffer[0];
+			sockaddr.sin_addr.S_un.S_un_b.s_b2 = inBuffer[1];
+			sockaddr.sin_addr.S_un.S_un_b.s_b3 = inBuffer[2];
+			sockaddr.sin_addr.S_un.S_un_b.s_b4 = inBuffer[3];
+			sockaddr.sin_port = htons(inBuffer[4] + inBuffer[5] * 256);
 
 			// Try to connect
 			if (connect(tcpSocket[slot], (struct sockaddr*)&sockaddr, sizeof(struct sockaddr_in)) < 0) {
@@ -611,14 +702,14 @@ unsigned char* HubProcessByte(unsigned char data, unsigned char* dlen, unsigned 
 
 			// Set non-blocking and time-out
 			ioctlsocket(webSocket[0], FIONBIO, &nonblocking_enabled);
-			webTimeout = inBuffer[3] + inBuffer[4] * 256;
+			webTimeout = inBuffer[2] + inBuffer[3] * 256;
 			webBusy = false;
 
 			// Set server settings
-			memset(&sockaddr, 0, sizeof(sockaddr));
+			ZeroMemory(&sockaddr, sizeof(sockaddr));
 			sockaddr.sin_family = AF_INET;
 			sockaddr.sin_addr.s_addr = inet_addr(localip);
-			sockaddr.sin_port = htons(inBuffer[1] + inBuffer[2] * 256);
+			sockaddr.sin_port = htons(inBuffer[0] + inBuffer[1] * 256);
 
 			// Bind and setup listener
 			if (bind(webSocket[0], (SOCKADDR*)&sockaddr, sizeof(sockaddr)) == SOCKET_ERROR) {
@@ -639,7 +730,7 @@ unsigned char* HubProcessByte(unsigned char data, unsigned char* dlen, unsigned 
 			slot = udpSlot;
 			if (udpSocket[slot] > 0) {
 				udpLen[slot] = sizeof(struct sockaddr_in);
-				if (sendto(udpSocket[slot], (char*)&inBuffer[1], (int)(inLen - 1), 0, (struct sockaddr*)&udpServer[slot], udpLen[slot]) == -1) {
+				if (sendto(udpSocket[slot], (char*)inBuffer, (int)(inLen), 0, (struct sockaddr*)&udpServer[slot], udpLen[slot]) == -1) {
 					closesocket(udpSocket[slot]);
 					udpSocket[slot] = 0;
 				}
@@ -650,7 +741,7 @@ unsigned char* HubProcessByte(unsigned char data, unsigned char* dlen, unsigned 
 			// Send packet to server
 			slot = tcpSlot;
 			if (tcpSocket[slot] > 0) {
-				if (send(tcpSocket[slot], (char*)&inBuffer[1], (int)(inLen - 1), 0) == -1) {
+				if (send(tcpSocket[slot], (char*)inBuffer, (int)(inLen), 0) == -1) {
 					closesocket(tcpSocket[slot]);
 					tcpSocket[slot] = 0;
 				}
@@ -662,7 +753,7 @@ unsigned char* HubProcessByte(unsigned char data, unsigned char* dlen, unsigned 
 			if (webSocket[1] > 0) {
 				webTxLen = 0;
 				memcpy((char*)&webTxBuffer[webTxLen], "HTTP/1.1 200 OK\r\nConnection: close\r\n", 36); webTxLen += 36;
-				memcpy((char*)&webTxBuffer[webTxLen], (char*)&inBuffer[1], inLen - 1); webTxLen += (inLen - 1);
+				memcpy((char*)&webTxBuffer[webTxLen], (char*)inBuffer, inLen); webTxLen += inLen;
 				memcpy((char*)&webTxBuffer[webTxLen], (char*)"\r\n\r\n", 4); webTxLen += 4;
 				//send(webSocket[1], (char*)webTxBuffer, (int)webTxLen, 0);
 				//webTxLen = 0;
@@ -672,7 +763,7 @@ unsigned char* HubProcessByte(unsigned char data, unsigned char* dlen, unsigned 
 		case HUB_WEB_BODY:
 			// Add body to contents
 			if (webSocket[1] > 0) {
-				memcpy((char*)&webTxBuffer[webTxLen], (char*)&inBuffer[1], inLen - 1); webTxLen += (inLen - 1);
+				memcpy((char*)&webTxBuffer[webTxLen], (char*)inBuffer, inLen); webTxLen += inLen;
 				//send(webSocket[1], (char*)webTxBuffer, (int)webTxLen, 0);
 				//webTxLen = 0;
 			}
@@ -726,8 +817,8 @@ unsigned char* HubProcessByte(unsigned char data, unsigned char* dlen, unsigned 
 				break;
 			}
 
-			if (gethostname((char*)&inBuffer[1], inLen - 1) == SOCKET_ERROR) break;
-			phe = gethostbyname((char*)&inBuffer[1]);
+			if (gethostname((char*)inBuffer, inLen) == SOCKET_ERROR) break;
+			phe = gethostbyname((char*)inBuffer);
 			if (phe == 0) break;
 			i = 0; while (phe->h_addr_list[i] != 0)
 				memcpy(&addr, phe->h_addr_list[i++], sizeof(struct in_addr));
@@ -749,45 +840,8 @@ unsigned char* HubProcessByte(unsigned char data, unsigned char* dlen, unsigned 
 		}
 	}
 
-	// Fetch next packet
-	packet_t* packet = packetHead;
-	if (packet) {
-		hubID = packet->ID;
-		hubLen = packet->len;
-		hubBuffer = packet->data;
-		mHubRX++;
-	}
-	else {
-		hubLen = 0;
-	}
-
-	// Encode RX/TX ID
-	unsigned char packetID = 0;
-	packetID = (hubID << 4) + (comID & 0x0f);
-
-	// Compute Checksum
-	checksum = packetID;
-	for (i = 0; i < 6; i++)
-		checksum += controls[i];
-	for (i = 0; i < hubLen; i++)
-		checksum += hubBuffer[i];
-
-	// Prepare rx data
-	len = 0;
-	outBuffer[len++] = 170;
-	outBuffer[len++] = packetID;
-	for (i = 0; i < 6; i++)
-		outBuffer[len++] = controls[i];
-	outBuffer[len++] = hubLen;
-	for (i = 0; i < hubLen; i++)
-		outBuffer[len++] = hubBuffer[i];
-	outBuffer[len++] = checksum;
-
-	// Timeout packets
-	HubTimeoutPacket();
-
-	// Return data packet
-	*dlen = len;
+	// Send back acknowledgment
+	*outLen = 1;
+	outBuffer[0] = 85;
 	return outBuffer;
 }
-

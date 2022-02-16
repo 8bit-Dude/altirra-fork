@@ -80,6 +80,7 @@ private:
 #define HUB_SYS_MOUSE     6
 #define HUB_SYS_VERSION   7
 #define HUB_SYS_UPDATE    8
+#define HUB_SYS_STATE     9
 #define HUB_DIR_LS       10
 #define HUB_DIR_MK       11
 #define HUB_DIR_RM       12
@@ -110,9 +111,11 @@ private:
 
 typedef struct packet {
 	unsigned char ID;
+	unsigned char cmd;
+	unsigned char slot;
 	unsigned char len;
 	unsigned char* data;
-	unsigned int timeout;
+	unsigned int  timeout;
 	struct packet* next;
 } packet_t;
 
